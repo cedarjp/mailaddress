@@ -5,6 +5,7 @@ import asyncio
 import import_data
 import scrape_emails
 import export_csv
+import status
 
 def main():
     parser = argparse.ArgumentParser(
@@ -37,6 +38,14 @@ def main():
     p_export.add_argument("-o", "--output", default="kaigo_facilities_with_emails.csv", help="出力先CSVファイルパス")
     p_export.add_argument("--db", default="kaigo.db", help="SQLiteデータベースファイルパス")
 
+    # 4. status コマンド
+    p_status = subparsers.add_parser("status", help="データ登録およびメール収集の進捗状況を表示")
+    p_status.add_argument("-f", "--file", help="取り込みファイル識別子またはファイル名（例: 110_訪問介護）")
+    p_status.add_argument("--code", help="都道府県コード又は市町村コード")
+    p_status.add_argument("--pref", help="都道府県名")
+    p_status.add_argument("--city", help="市区町村名")
+    p_status.add_argument("--db", default="kaigo.db", help="SQLiteデータベースファイルパス")
+
     args = parser.parse_args()
 
     if args.command == "import":
@@ -56,6 +65,14 @@ def main():
         export_csv.export_facilities_to_csv(
             db_path=args.db,
             output_file=args.output,
+            file_filter=args.file,
+            code=args.code,
+            pref=args.pref,
+            city=args.city
+        )
+    elif args.command == "status":
+        status.display_status(
+            db_path=args.db,
             file_filter=args.file,
             code=args.code,
             pref=args.pref,

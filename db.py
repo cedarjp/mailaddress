@@ -317,3 +317,162 @@ class Database:
             cursor = conn.cursor()
             cursor.execute(query, params)
             return cursor.fetchall()
+
+    def get_summary_stats(
+        self,
+        file_identifier: Optional[str] = None,
+        code: Optional[str] = None,
+        pref_name: Optional[str] = None,
+        city_name: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """全体ステータスのサマリーを取得"""
+        where_clause = " WHERE 1=1"
+        params = []
+
+        if file_identifier:
+            where_clause += " AND (sf.file_identifier LIKE ? OR sf.file_name LIKE ?)"
+            params.extend([f"%{file_identifier}%", f"%{file_identifier}%"])
+        if code:
+            where_clause += " AND f.code = ?"
+            params.append(code)
+        if pref_name:
+            where_clause += " AND f.pref_name LIKE ?"
+            params.append(f"%{pref_name}%")
+        if city_name:
+            where_clause += " AND f.city_name LIKE ?"
+            params.append(f"%{city_name}%")
+
+        query = f"""
+        SELECT
+            COUNT(f.id) AS total_facilities,
+            SUM(CASE WHEN f.url IS NOT NULL AND f.url != '' THEN 1 ELSE 0 END) AS url_count,
+            SUM(CASE WHEN f.scrape_status = 'pending' AND f.url IS NOT NULL AND f.url != '' THEN 1 ELSE 0 END) AS pending_count,
+            SUM(CASE WHEN f.scrape_status = 'completed' THEN 1 ELSE 0 END) AS completed_count,
+            SUM(CASE WHEN f.scrape_status = 'no_email' THEN 1 ELSE 0 END) AS no_email_count,
+            SUM(CASE WHEN f.scrape_status = 'no_url' THEN 1 ELSE 0 END) AS no_url_count,
+            SUM(CASE WHEN f.scrape_status = 'failed' THEN 1 ELSE 0 END) AS failed_count
+        FROM facilities f
+        JOIN source_files sf ON f.source_file_id = sf.id
+        {where_clause}
+        """
+
+        email_query = f"""
+        SELECT
+            COUNT(DISTINCT e.email) AS unique_emails,
+            COUNT(DISTINCT e.facility_id) AS facilities_with_email
+        FROM emails e
+        JOIN facilities f ON e.facility_id = f.id
+        JOIN source_files sf ON f.source_file_id = sf.id
+        {where_clause}
+        """
+
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(query, params)
+            row = cursor.fetchone()
+
+            cursor.execute(email_query, params)
+            email_row = cursor.fetchone()
+
+            return {
+                "total_facilities": row["total_facilities"] or 0,
+                "url_count": row["url_count"] or 0,
+                "pending_count": row["pending_count"] or 0,
+                "completed_count": row["completed_count"] or 0,
+                "no_email_count": row["no_email_count"] or 0,
+                "no_url_count": row["no_url_count"] or 0,
+                "failed_count": row["failed_count"] or 0,
+                "unique_emails": email_row["unique_emails"] or 0,
+                "facilities_with_email": email_row["facilities_with_email"] or 0,
+            }
+
+    def get_stats_by_file(
+        self,
+        file_identifier: Optional[str] = None,
+        code: Optional[str] = None,
+        pref_name: Optional[str] = None,
+        city_name: Optional[str] = None
+    ) -> List[sqlite3.Row]:
+        """ファイル識別子ごとの内訳を取得"""
+        where_clause = " WHERE 1=1"
+        params = []
+
+        if file_identifier:
+            where_clause += " AND (sf.file_identifier LIKE ? OR sf.file_name LIKE ?)"
+            params.extend([f"%{file_identifier}%", f"%{file_identifier}%"])
+        if code:
+            where_clause += " AND f.code = ?"
+            params.append(code)
+        if pref_name:
+            where_clause += " AND f.pref_name LIKE ?"
+            params.append(f"%{pref_name}%")
+        if city_name:
+            where_clause += " AND f.city_name LIKE ?"
+            params.append(f"%{city_name}%")
+
+        query = f"""
+        SELECT
+            sf.file_identifier,
+            COUNT(f.id) AS total_count,
+            SUM(CASE WHEN f.scrape_status IN ('completed', 'no_email', 'failed') THEN 1 ELSE 0 END) AS processed_count,
+            SUM(CASE WHEN f.scrape_status = 'completed' THEN 1 ELSE 0 END) AS success_count,
+            COUNT(DISTINCT e.email) AS email_count
+        FROM source_files sf
+        JOIN facilities f ON f.source_file_id = sf.id
+        LEFT JOIN emails e ON f.id = e.facility_id
+        {where_clause}
+        GROUP BY sf.file_identifier
+        ORDER BY total_count DESC
+        """
+
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(query, params)
+            return cursor.fetchall()
+
+    def get_stats_by_pref(
+        self,
+        file_identifier: Optional[str] = None,
+        code: Optional[str] = None,
+        pref_name: Optional[str] = None,
+        city_name: Optional[str] = None,
+        limit: int = 10
+    ) -> List[sqlite3.Row]:
+        """都道府県ごとの内訳を取得"""
+        where_clause = " WHERE 1=1"
+        params = []
+
+        if file_identifier:
+            where_clause += " AND (sf.file_identifier LIKE ? OR sf.file_name LIKE ?)"
+            params.extend([f"%{file_identifier}%", f"%{file_identifier}%"])
+        if code:
+            where_clause += " AND f.code = ?"
+            params.append(code)
+        if pref_name:
+            where_clause += " AND f.pref_name LIKE ?"
+            params.append(f"%{pref_name}%")
+        if city_name:
+            where_clause += " AND f.city_name LIKE ?"
+            params.append(f"%{city_name}%")
+
+        query = f"""
+        SELECT
+            COALESCE(f.pref_name, '不明') AS pref_name,
+            COUNT(f.id) AS total_count,
+            SUM(CASE WHEN f.scrape_status IN ('completed', 'no_email', 'failed') THEN 1 ELSE 0 END) AS processed_count,
+            COUNT(DISTINCT e.email) AS email_count
+        FROM facilities f
+        JOIN source_files sf ON f.source_file_id = sf.id
+        LEFT JOIN emails e ON f.id = e.facility_id
+        {where_clause}
+        GROUP BY f.pref_name
+        ORDER BY total_count DESC
+        LIMIT ?
+        """
+        params.append(limit)
+
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(query, params)
+            return cursor.fetchall()
+
