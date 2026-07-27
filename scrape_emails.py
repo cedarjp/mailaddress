@@ -2,12 +2,22 @@ import argparse
 import asyncio
 import gc
 import re
+import sys
 import time
 import urllib.parse
 from typing import List, Set, Tuple, Optional
 from playwright.async_api import async_playwright, Page, BrowserContext
 
 from db import Database
+
+# Windows環境でのクラッシュポップアップ（WerFault.exe / 動作を停止しましたダイアログ）を無効化
+if sys.platform == "win32":
+    try:
+        import ctypes
+        # SEM_FAILCRITICALERRORS (0x0001) | SEM_NOGPFAULTERRORBOX (0x0002)
+        ctypes.windll.kernel32.SetErrorMode(0x0001 | 0x0002)
+    except Exception:
+        pass
 
 # メールアドレス正規表現
 EMAIL_REGEX = re.compile(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}')
@@ -200,52 +210,66 @@ async def run_scraper(
     total_count = len(facilities)
     print(f"対象事業所数: {total_count} 件 (バッチ再起動単位: {batch_size} 件ごと, 1事業所最大タイムアウト: {facility_timeout}秒)")
 
+    # クラッシュ報告ダイアログ（WerFault）およびレンダラークラッシュの抑制フラグ
+    chromium_args = [
+        "--disable-breakpad",
+        "--disable-crash-reporter",
+        "--no-crash-upload",
+        "--disable-gpu",
+        "--disable-dev-shm-usage",
+    ]
+
     async with async_playwright() as p:
         # batch_size 件ごとにブラウザインスタンスを再リフレッシュ（メモリ解放）
         for batch_start in range(0, total_count, batch_size):
             batch_items = facilities[batch_start:batch_start + batch_size]
             print(f"\n--- [ブラウザセッション開始: {batch_start + 1}〜{batch_start + len(batch_items)} / {total_count} 件] ---")
 
-            browser = await p.chromium.launch(headless=headless)
-            context = await browser.new_context(
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-            )
-
-            for idx, fac in enumerate(batch_items, batch_start + 1):
-                fac_id = fac["id"]
-                fac_name = fac["facility_name"]
-                url = fac["url"]
-
-                print(f"[{idx}/{total_count}] Processing: ID={fac_id}, {fac_name} ({url})...")
-
-                try:
-                    # 1事業所のスクレイピング全体に対してタイムアウト保護を設定（ハング防止）
-                    emails, status = await asyncio.wait_for(
-                        scrape_facility_emails(context, url, interval=interval),
-                        timeout=facility_timeout
-                    )
-
-                    if emails:
-                        print(f"  -> Found {len(emails)} email(s): {[e[0] for e in emails]}")
-                        db.add_emails(fac_id, emails)
-                        db.update_facility_scrape_status(fac_id, 'completed')
-                    else:
-                        print(f"  -> No email found. Status: {status}")
-                        db.update_facility_scrape_status(fac_id, status)
-
-                except asyncio.TimeoutError:
-                    print(f"  -> Timed out ({facility_timeout}s exceeded). Skipping facility.")
-                    db.update_facility_scrape_status(fac_id, 'failed')
-                except Exception as e:
-                    print(f"  -> Error scraping {url}: {e}")
-                    db.update_facility_scrape_status(fac_id, 'failed')
-
-            # バッチ完了時にブラウザを閉じて明示的にガベージコレクションを実行
             try:
-                await context.close()
-                await browser.close()
-            except Exception:
-                pass
+                browser = await p.chromium.launch(headless=headless, args=chromium_args)
+                context = await browser.new_context(
+                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                )
+
+                for idx, fac in enumerate(batch_items, batch_start + 1):
+                    fac_id = fac["id"]
+                    fac_name = fac["facility_name"]
+                    url = fac["url"]
+
+                    print(f"[{idx}/{total_count}] Processing: ID={fac_id}, {fac_name} ({url})...")
+
+                    try:
+                        # 1事業所のスクレイピング全体に対してタイムアウト保護を設定（ハング防止）
+                        emails, status = await asyncio.wait_for(
+                            scrape_facility_emails(context, url, interval=interval),
+                            timeout=facility_timeout
+                        )
+
+                        if emails:
+                            print(f"  -> Found {len(emails)} email(s): {[e[0] for e in emails]}")
+                            db.add_emails(fac_id, emails)
+                            db.update_facility_scrape_status(fac_id, 'completed')
+                        else:
+                            print(f"  -> No email found. Status: {status}")
+                            db.update_facility_scrape_status(fac_id, status)
+
+                    except asyncio.TimeoutError:
+                        print(f"  -> Timed out ({facility_timeout}s exceeded). Skipping facility.")
+                        db.update_facility_scrape_status(fac_id, 'failed')
+                    except Exception as e:
+                        print(f"  -> Error scraping {url}: {e}")
+                        db.update_facility_scrape_status(fac_id, 'failed')
+
+                # バッチ完了時にブラウザを閉じて明示的にガベージコレクションを実行
+                try:
+                    await context.close()
+                    await browser.close()
+                except Exception:
+                    pass
+
+            except Exception as batch_err:
+                print(f"  -> Browser session error: {batch_err}")
+
             gc.collect()
 
     print("\nすべてのスクレイピング処理が完了しました。")
