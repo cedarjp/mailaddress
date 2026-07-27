@@ -6,6 +6,7 @@ import import_data
 import scrape_emails
 import export_csv
 import status
+import backup
 
 def main():
     parser = argparse.ArgumentParser(
@@ -48,6 +49,17 @@ def main():
     p_status.add_argument("--city", help="市区町村名")
     p_status.add_argument("--db", default="kaigo.db", help="SQLiteデータベースファイルパス")
 
+    # 5. backup コマンド
+    p_backup = subparsers.add_parser("backup", help="データベースのバックアップを作成")
+    p_backup.add_argument("--db", default="kaigo.db", help="SQLiteデータベースファイルパス")
+    p_backup.add_argument("--dir", default="backup", help="バックアップ保存先フォルダ")
+
+    # 6. restore コマンド
+    p_restore = subparsers.add_parser("restore", help="バックアップファイルからデータベースを復元")
+    p_restore.add_argument("-f", "--file", required=True, help="復元元バックアップファイル名")
+    p_restore.add_argument("--db", default="kaigo.db", help="復元先SQLiteデータベースファイルパス")
+    p_restore.add_argument("--dir", default="backup", help="バックアップ保存先フォルダ")
+
     args = parser.parse_args()
 
     if args.command == "import":
@@ -82,6 +94,11 @@ def main():
             pref=args.pref,
             city=args.city
         )
+    elif args.command == "backup":
+        backup.create_backup(db_path=args.db, backup_dir=args.dir)
+        backup.list_backups(backup_dir=args.dir)
+    elif args.command == "restore":
+        backup.restore_backup(file_identifier=args.file, db_path=args.db, backup_dir=args.dir)
     else:
         parser.print_help()
 

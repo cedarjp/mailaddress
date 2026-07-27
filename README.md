@@ -121,9 +121,29 @@ python status.py -f 110
 
 ---
 
+### 5. バックアップ・復元コマンド (`backup`, `restore`)
+
+`backup/` フォルダ（Gitコミット対象外）内に、実行日時付きのバックアップDBを作成および復元します。
+
+```bash
+# 現在のデータベース（kaigo.db）のバックアップを作成 & 一覧表示
+python main.py backup
+
+# バックアップ一覧の確認のみ
+python backup.py list
+
+# バックアップファイル名を指定して復元
+python main.py restore -f backup_kaigo_20260727_220722.db
+
+# または個別スクリプト実行
+python backup.py restore -f backup_kaigo_20260727_220722.db
+```
+
+---
+
 ## 🧪 テストの実行
 
-全テストスイート（DB、インポート、スクレイピング解析、エクスポート、ステータス、CLI統合テスト）を実行します。
+全テストスイート（DB、インポート、スクレイピング解析、エクスポート、ステータス、バックアップ・復元、CLI統合テスト）を実行します。
 
 ```bash
 pytest
