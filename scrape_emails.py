@@ -1,6 +1,7 @@
 import argparse
 import asyncio
 import gc
+import os
 import re
 import sys
 import time
@@ -11,11 +12,12 @@ from playwright.async_api import async_playwright, Page, BrowserContext
 from db import Database
 
 # Windows環境でのクラッシュポップアップ（WerFault.exe / 動作を停止しましたダイアログ）を無効化
+os.environ["WER_DONT_SHOW_UI"] = "1"
 if sys.platform == "win32":
     try:
         import ctypes
-        # SEM_FAILCRITICALERRORS (0x0001) | SEM_NOGPFAULTERRORBOX (0x0002)
-        ctypes.windll.kernel32.SetErrorMode(0x0001 | 0x0002)
+        # SEM_FAILCRITICALERRORS (0x0001) | SEM_NOGPFAULTERRORBOX (0x0002) | SEM_NOOPENFILEERRORBOX (0x8000)
+        ctypes.windll.kernel32.SetErrorMode(0x0001 | 0x0002 | 0x8000)
     except Exception:
         pass
 
@@ -219,6 +221,11 @@ async def run_scraper(
         "--disable-dev-shm-usage",
     ]
 
+    # 不安定な chrome-headless-shell.exe を避け、安定した標準 Chromium の New Headless モードを使用
+    launch_headless = False
+    if headless:
+        chromium_args.append("--headless=new")
+
     async with async_playwright() as p:
         # batch_size 件ごとにブラウザインスタンスを再リフレッシュ（メモリ解放）
         for batch_start in range(0, total_count, batch_size):
@@ -226,7 +233,7 @@ async def run_scraper(
             print(f"\n--- [ブラウザセッション開始: {batch_start + 1}〜{batch_start + len(batch_items)} / {total_count} 件] ---")
 
             try:
-                browser = await p.chromium.launch(headless=headless, args=chromium_args)
+                browser = await p.chromium.launch(headless=launch_headless, args=chromium_args)
                 context = await browser.new_context(
                     user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
                 )
