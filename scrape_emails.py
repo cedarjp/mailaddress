@@ -1,5 +1,6 @@
 import argparse
 import asyncio
+import gc
 import re
 import time
 import urllib.parse
@@ -141,7 +142,10 @@ async def scrape_facility_emails(
         if not emails_found:
             status = 'failed'
     finally:
-        await page.close()
+        try:
+            await page.close()
+        except Exception:
+            pass
 
     return list(emails_found), status
 
@@ -152,6 +156,7 @@ async def run_scraper(
     city: Optional[str] = None,
     limit: Optional[int] = None,
     interval: float = 1.0,
+    batch_size: int = 50,
     db_path: str = "kaigo.db",
     headless: bool = True
 ):
@@ -170,41 +175,50 @@ async def run_scraper(
         print("対象となるスクレイピング未実行の事業所データが見つかりませんでした。")
         return
 
-    print(f"対象事業所数: {len(facilities)} 件")
+    total_count = len(facilities)
+    print(f"対象事業所数: {total_count} 件 (バッチ再起動単位: {batch_size} 件ごと)")
 
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=headless)
-        context = await browser.new_context(
-            user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        )
+        # batch_size 件ごとにブラウザインスタンスを再リフレッシュ（メモリ解放）
+        for batch_start in range(0, total_count, batch_size):
+            batch_items = facilities[batch_start:batch_start + batch_size]
+            print(f"\n--- [ブラウザセッション開始: {batch_start + 1}〜{batch_start + len(batch_items)} / {total_count} 件] ---")
 
-        for idx, fac in enumerate(facilities, 1):
-            fac_id = fac["id"]
-            fac_name = fac["facility_name"]
-            url = fac["url"]
+            browser = await p.chromium.launch(headless=headless)
+            context = await browser.new_context(
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            )
 
-            print(f"[{idx}/{len(facilities)}] Processing: ID={fac_id}, {fac_name} ({url})...")
+            for idx, fac in enumerate(batch_items, batch_start + 1):
+                fac_id = fac["id"]
+                fac_name = fac["facility_name"]
+                url = fac["url"]
 
-            try:
-                emails, status = await scrape_facility_emails(
-                    context, url, interval=interval
-                )
+                print(f"[{idx}/{total_count}] Processing: ID={fac_id}, {fac_name} ({url})...")
 
-                if emails:
-                    print(f"  -> Found {len(emails)} email(s): {[e[0] for e in emails]}")
-                    db.add_emails(fac_id, emails)
-                    db.update_facility_scrape_status(fac_id, 'completed')
-                else:
-                    print(f"  -> No email found. Status: {status}")
-                    db.update_facility_scrape_status(fac_id, status)
+                try:
+                    emails, status = await scrape_facility_emails(
+                        context, url, interval=interval
+                    )
 
-            except Exception as e:
-                print(f"  -> Error scraping {url}: {e}")
-                db.update_facility_scrape_status(fac_id, 'failed')
+                    if emails:
+                        print(f"  -> Found {len(emails)} email(s): {[e[0] for e in emails]}")
+                        db.add_emails(fac_id, emails)
+                        db.update_facility_scrape_status(fac_id, 'completed')
+                    else:
+                        print(f"  -> No email found. Status: {status}")
+                        db.update_facility_scrape_status(fac_id, status)
 
-        await browser.close()
+                except Exception as e:
+                    print(f"  -> Error scraping {url}: {e}")
+                    db.update_facility_scrape_status(fac_id, 'failed')
 
-    print("スクレイピング完了。")
+            # バッチ完了時にブラウザを閉じて明示的にガベージコレクションを実行
+            await context.close()
+            await browser.close()
+            gc.collect()
+
+    print("\nすべてのスクレイピング処理が完了しました。")
 
 def main():
     parser = argparse.ArgumentParser(description="介護事業所WebサイトからPlaywrightを用いてメールアドレスを取得します")
@@ -214,6 +228,7 @@ def main():
     parser.add_argument("--city", help="市区町村名（例: 札幌市中央区）")
     parser.add_argument("-n", "--limit", type=int, help="処理件数上限")
     parser.add_argument("--interval", type=float, default=1.0, help="ページ遷移ごとの待機秒数（デフォルト: 1.0秒）")
+    parser.add_argument("-b", "--batch-size", type=int, default=50, help="ブラウザ再起動を行う件数単位（デフォルト: 50件）")
     parser.add_argument("--db", default="kaigo.db", help="SQLiteデータベースファイルパス")
     parser.add_argument("--head", action="store_true", help="ブラウザ画面を表示して実行")
 
@@ -226,6 +241,7 @@ def main():
         city=args.city,
         limit=args.limit,
         interval=args.interval,
+        batch_size=args.batch_size,
         db_path=args.db,
         headless=not args.head
     ))

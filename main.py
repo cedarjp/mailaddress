@@ -26,6 +26,7 @@ def main():
     p_scrape.add_argument("--city", help="市区町村名（例: 札幌市中央区）")
     p_scrape.add_argument("-n", "--limit", type=int, help="処理件数上限")
     p_scrape.add_argument("--interval", type=float, default=1.0, help="ページ遷移ごとの待機秒数（デフォルト: 1.0秒）")
+    p_scrape.add_argument("-b", "--batch-size", type=int, default=50, help="ブラウザ再起動を行う件数単位（デフォルト: 50件）")
     p_scrape.add_argument("--db", default="kaigo.db", help="SQLiteデータベースファイルパス")
     p_scrape.add_argument("--head", action="store_true", help="ブラウザ画面を表示して実行")
 
@@ -58,6 +59,7 @@ def main():
             city=args.city,
             limit=args.limit,
             interval=args.interval,
+            batch_size=args.batch_size,
             db_path=args.db,
             headless=not args.head
         ))
