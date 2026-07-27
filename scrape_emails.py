@@ -42,9 +42,15 @@ def extract_emails_from_links(links: List[str]) -> Set[str]:
                 emails.add(raw_email)
     return emails
 
-async def extract_links_from_page(page: Page, base_url: str) -> List[str]:
+def get_base_domain(url: str) -> str:
+    """URLからドメイン部分を取り出し、www.を除去して正規化"""
+    netloc = urllib.parse.urlparse(url).netloc.lower()
+    if netloc.startswith('www.'):
+        netloc = netloc[4:]
+    return netloc
+
+async def extract_links_from_page(page: Page, base_domains: Set[str]) -> List[str]:
     """ページ内の同一ドメインのリンクを取得"""
-    base_domain = urllib.parse.urlparse(base_url).netloc
     try:
         elements = await page.query_selector_all('a[href]')
         hrefs = []
@@ -54,8 +60,9 @@ async def extract_links_from_page(page: Page, base_url: str) -> List[str]:
             if href:
                 full_url = urllib.parse.urljoin(page.url, href)
                 parsed = urllib.parse.urlparse(full_url)
-                # HTTP/HTTPS かつ同一ドメインのみに対象を絞る
-                if parsed.scheme in ('http', 'https') and parsed.netloc == base_domain:
+                target_domain = get_base_domain(full_url)
+                # HTTP/HTTPS かつ許可ドメインのみに対象を絞る
+                if parsed.scheme in ('http', 'https') and target_domain in base_domains:
                     hrefs.append((full_url, text))
         
         # 優先キーワードが含まれるリンクを前にソート
@@ -88,7 +95,12 @@ async def scrape_facility_emails(
     emails_found: Set[Tuple[str, str]] = set()
 
     page = await context.new_page()
+
+    # JSのアラート/ダイアログが出ても即座に閉じてフリーズを防ぐ
+    page.on("dialog", lambda dialog: asyncio.create_task(dialog.dismiss()))
+
     status = 'no_email'
+    allowed_domains: Set[str] = {get_base_domain(start_url)}
 
     try:
         while queue and len(visited) < max_pages:
@@ -108,20 +120,29 @@ async def scrape_facility_emails(
                 response = await page.goto(clean_url, wait_until='domcontentloaded', timeout=15000)
                 if not response or response.status >= 400:
                     continue
+                # リダイレクト後のドメインも許可対象に追加（例: http -> https や 別ドメイン移転対応）
+                allowed_domains.add(get_base_domain(page.url))
             except Exception:
                 continue
 
-            # DOM全体テキストの取得
-            content = await page.content()
-            page_text = await page.inner_text('body') if await page.query_selector('body') else content
+            # DOM全体テキストの取得（タイムアウト付き保護）
+            try:
+                content = await page.content()
+                page_text = await page.inner_text('body') if await page.query_selector('body') else content
+            except Exception:
+                content = ""
+                page_text = ""
 
             # テキストからのメール抽出
             extracted = extract_emails_from_text(page_text)
             
             # mailto: リンクからの抽出
-            mailto_elements = await page.query_selector_all('a[href^="mailto:"]')
-            mailto_hrefs = [await elem.get_attribute('href') for elem in mailto_elements if await elem.get_attribute('href')]
-            mailto_emails = extract_emails_from_links(mailto_hrefs)
+            try:
+                mailto_elements = await page.query_selector_all('a[href^="mailto:"]')
+                mailto_hrefs = [await elem.get_attribute('href') for elem in mailto_elements if await elem.get_attribute('href')]
+                mailto_emails = extract_emails_from_links(mailto_hrefs)
+            except Exception:
+                mailto_emails = set()
             
             all_page_emails = extracted.union(mailto_emails)
 
@@ -133,7 +154,7 @@ async def scrape_facility_emails(
 
             # メールが見つからず、まだ深さ上限に達していなければリンクをキューに追加
             if depth < max_depth:
-                next_links = await extract_links_from_page(page, start_url)
+                next_links = await extract_links_from_page(page, allowed_domains)
                 for link in next_links:
                     if link.split('#')[0] not in visited:
                         queue.append((link, depth + 1))
@@ -157,6 +178,7 @@ async def run_scraper(
     limit: Optional[int] = None,
     interval: float = 1.0,
     batch_size: int = 50,
+    facility_timeout: float = 45.0,
     db_path: str = "kaigo.db",
     headless: bool = True
 ):
@@ -176,7 +198,7 @@ async def run_scraper(
         return
 
     total_count = len(facilities)
-    print(f"対象事業所数: {total_count} 件 (バッチ再起動単位: {batch_size} 件ごと)")
+    print(f"対象事業所数: {total_count} 件 (バッチ再起動単位: {batch_size} 件ごと, 1事業所最大タイムアウト: {facility_timeout}秒)")
 
     async with async_playwright() as p:
         # batch_size 件ごとにブラウザインスタンスを再リフレッシュ（メモリ解放）
@@ -197,8 +219,10 @@ async def run_scraper(
                 print(f"[{idx}/{total_count}] Processing: ID={fac_id}, {fac_name} ({url})...")
 
                 try:
-                    emails, status = await scrape_facility_emails(
-                        context, url, interval=interval
+                    # 1事業所のスクレイピング全体に対してタイムアウト保護を設定（ハング防止）
+                    emails, status = await asyncio.wait_for(
+                        scrape_facility_emails(context, url, interval=interval),
+                        timeout=facility_timeout
                     )
 
                     if emails:
@@ -209,13 +233,19 @@ async def run_scraper(
                         print(f"  -> No email found. Status: {status}")
                         db.update_facility_scrape_status(fac_id, status)
 
+                except asyncio.TimeoutError:
+                    print(f"  -> Timed out ({facility_timeout}s exceeded). Skipping facility.")
+                    db.update_facility_scrape_status(fac_id, 'failed')
                 except Exception as e:
                     print(f"  -> Error scraping {url}: {e}")
                     db.update_facility_scrape_status(fac_id, 'failed')
 
             # バッチ完了時にブラウザを閉じて明示的にガベージコレクションを実行
-            await context.close()
-            await browser.close()
+            try:
+                await context.close()
+                await browser.close()
+            except Exception:
+                pass
             gc.collect()
 
     print("\nすべてのスクレイピング処理が完了しました。")
@@ -229,6 +259,7 @@ def main():
     parser.add_argument("-n", "--limit", type=int, help="処理件数上限")
     parser.add_argument("--interval", type=float, default=1.0, help="ページ遷移ごとの待機秒数（デフォルト: 1.0秒）")
     parser.add_argument("-b", "--batch-size", type=int, default=50, help="ブラウザ再起動を行う件数単位（デフォルト: 50件）")
+    parser.add_argument("--facility-timeout", type=float, default=45.0, help="1事業所あたりの全体最大タイムアウト秒数（デフォルト: 45秒）")
     parser.add_argument("--db", default="kaigo.db", help="SQLiteデータベースファイルパス")
     parser.add_argument("--head", action="store_true", help="ブラウザ画面を表示して実行")
 
@@ -242,6 +273,7 @@ def main():
         limit=args.limit,
         interval=args.interval,
         batch_size=args.batch_size,
+        facility_timeout=args.facility_timeout,
         db_path=args.db,
         headless=not args.head
     ))

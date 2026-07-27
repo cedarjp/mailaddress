@@ -27,6 +27,7 @@ def main():
     p_scrape.add_argument("-n", "--limit", type=int, help="処理件数上限")
     p_scrape.add_argument("--interval", type=float, default=1.0, help="ページ遷移ごとの待機秒数（デフォルト: 1.0秒）")
     p_scrape.add_argument("-b", "--batch-size", type=int, default=50, help="ブラウザ再起動を行う件数単位（デフォルト: 50件）")
+    p_scrape.add_argument("--facility-timeout", type=float, default=45.0, help="1事業所あたりの全体最大タイムアウト秒数（デフォルト: 45秒）")
     p_scrape.add_argument("--db", default="kaigo.db", help="SQLiteデータベースファイルパス")
     p_scrape.add_argument("--head", action="store_true", help="ブラウザ画面を表示して実行")
 
@@ -60,6 +61,7 @@ def main():
             limit=args.limit,
             interval=args.interval,
             batch_size=args.batch_size,
+            facility_timeout=args.facility_timeout,
             db_path=args.db,
             headless=not args.head
         ))
